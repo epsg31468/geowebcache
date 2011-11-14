@@ -405,7 +405,9 @@ public class WMSTileFuser {
 
         response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType(this.outputFormat.getMimeType());
-        response.setCharacterEncoding("UTF-8");
+        // MapXtreme doesn't like a charset with "image/png" like in "image/png;charset=UTF-8".
+        // Thus we comment it out here.
+        //response.setCharacterEncoding("UTF-8");
 
         ServletOutputStream os = response.getOutputStream();
         AccountingOutputStream aos = new AccountingOutputStream(os);

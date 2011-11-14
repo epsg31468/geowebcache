@@ -110,7 +110,8 @@ public abstract class Service {
             mimeStr = mimeTypeOverride;
         }
         
-        response.setCharacterEncoding("utf-8");
+        // MapXtreme doesn't like this:
+        //response.setCharacterEncoding("utf-8");
 
         response.setStatus((int) conv.getStatus());
 
