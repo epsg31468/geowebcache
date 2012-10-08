@@ -17,12 +17,14 @@
 package org.geowebcache.layer;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -35,8 +37,10 @@ import org.geowebcache.filter.request.RequestFilter;
 import org.geowebcache.filter.request.RequestFilterException;
 import org.geowebcache.grid.BoundingBox;
 import org.geowebcache.grid.GridMismatchException;
+import org.geowebcache.grid.GridSet;
 import org.geowebcache.grid.GridSetBroker;
 import org.geowebcache.grid.GridSubset;
+import org.geowebcache.grid.GridUtil;
 import org.geowebcache.grid.OutsideCoverageException;
 import org.geowebcache.grid.SRS;
 import org.geowebcache.io.ByteArrayResource;
@@ -84,6 +88,8 @@ public abstract class TileLayer {
      */
     public abstract boolean removeLayerListener(TileLayerListener listener);
 
+    public abstract String getId();
+    
     /**
      * Then name of the layer
      * 
@@ -110,12 +116,15 @@ public abstract class TileLayer {
     public abstract LayerMetaInformation getMetaInformation();
 
     /**
-     * Retrieves a list of Grids for this layer
+     * Retrieves the GridSet names for this layer.
+     * <p>
+     * The returned set is immutable.
+     * </p>
      * 
-     * @return
+     * @see #getGridSubset(String)
      */
-    public abstract Map<String, GridSubset> getGridSubsets();
-
+    public abstract Set<String> getGridSubsets();
+    
     /**
      * @return possibly empty list of update sources for this layer
      */
@@ -233,36 +242,41 @@ public abstract class TileLayer {
     public abstract boolean initialize(GridSetBroker gridSetBroker);
 
     /**
-     * Acquire the global lock for the layer, primarily used for truncating
+     * This methdod is deprecated, as a layer may be configured for more than one gridset with the
+     * same SRS.
      * 
-     */
-    public abstract void acquireLayerLock();
-
-    /**
-     * Release the global lock for the layer
-     * 
-     */
-    public abstract void releaseLayerLock();
-
-    /**
-     * Whether the layer supports the given projection
-     * 
-     * @param srs
-     *            Name of projection, for example "EPSG:4326"
-     * @return
-     * @throws GeoWebCacheException
+     * @deprecated use {@link #getGridSubsetsForSRS(SRS)} in combination with
+     *             {@link GridUtil#findBestMatchingGrid} instead
      */
     public GridSubset getGridSubsetForSRS(SRS srs) {
-        Map<String, GridSubset> gridSubsets = getGridSubsets();
-        Iterator<GridSubset> iter = gridSubsets.values().iterator();
-        while (iter.hasNext()) {
-            GridSubset gridSubset = iter.next();
-            if (gridSubset.getSRS().equals(srs)) {
+        for (String gridSet : getGridSubsets()) {
+            GridSubset gridSubset = getGridSubset(gridSet);
+            SRS gridSetSRS = gridSubset.getSRS();
+            if (gridSetSRS.equals(srs)) {
                 return gridSubset;
             }
         }
-
         return null;
+    }
+
+    /**
+     * Returns an immutable list of all the layer's {@link GridSubset} whose {@link GridSet} has a
+     * SRS equal to {@code srs} (may be an alias), or the empty list of none matches.
+     */
+    public List<GridSubset> getGridSubsetsForSRS(SRS srs) {
+        List<GridSubset> matches = Collections.emptyList();
+
+        for (String gridSet : getGridSubsets()) {
+            GridSubset gridSubset = getGridSubset(gridSet);
+            SRS gridSetSRS = gridSubset.getSRS();
+            if (gridSetSRS.equals(srs)) {
+                if (matches.isEmpty()) {
+                    matches = new ArrayList<GridSubset>(2);
+                }
+                matches.add(gridSubset);
+            }
+        }
+        return matches.isEmpty() ? matches : Collections.unmodifiableList(matches);
     }
 
     /**
@@ -312,7 +326,7 @@ public abstract class TileLayer {
      * @return the resolutions (units/pixel) for the layer
      */
     public double[] getResolutions(String gridSetId) throws GeoWebCacheException {
-        return getGridSubsets().get(gridSetId).getResolutions();
+        return getGridSubset(gridSetId).getResolutions();
     }
 
     public FormatModifier getFormatModifier(MimeType responseFormat) {
@@ -355,7 +369,7 @@ public abstract class TileLayer {
      */
     public long[] indexFromBounds(String gridSetId, BoundingBox tileBounds)
             throws GridMismatchException {
-        return getGridSubsets().get(gridSetId).closestIndex(tileBounds);
+        return getGridSubset(gridSetId).closestIndex(tileBounds);
     }
 
     /**
@@ -366,7 +380,7 @@ public abstract class TileLayer {
      * @throws GeoWebCacheException
      */
     public BoundingBox boundsFromIndex(String gridSetId, long[] gridLoc) {
-        return getGridSubsets().get(gridSetId).boundsFromIndex(gridLoc);
+        return getGridSubset(gridSetId).boundsFromIndex(gridLoc);
     }
 
     /**
@@ -514,9 +528,16 @@ public abstract class TileLayer {
         }
     }
 
-    public GridSubset getGridSubset(String gridSetId) {
-        return getGridSubsets().get(gridSetId);
-    }
+    /**
+     * @param gridSetId
+     *            the name of the {@link GridSet}
+     * @return the {@link GridSubset} this layer contains for the given GridSet
+     */
+    public abstract GridSubset getGridSubset(String gridSetId);
+
+    public abstract GridSubset removeGridSubset(String gridSetId);
+
+    public abstract void addGridSubset(GridSubset gridSubset);
 
     protected ByteArrayResource getImageBuffer(ThreadLocal<ByteArrayResource> tl) {
         ByteArrayResource buffer = tl.get();
@@ -531,11 +552,11 @@ public abstract class TileLayer {
     /**
      * Loops over the gridPositions, generates cache keys and saves to cache
      * 
-     * @param gridPositions
      * @param metaTile
-     * @param imageFormat
+     * @param tileProto
+     * @param requestTime
      */
-    protected void saveTiles(MetaTile metaTile, ConveyorTile tileProto) throws GeoWebCacheException {
+    protected void saveTiles(MetaTile metaTile, ConveyorTile tileProto, long requestTime) throws GeoWebCacheException {
 
         final long[][] gridPositions = metaTile.getTilesGridPositions();
         final long[] gridLoc = tileProto.getTileIndex();
@@ -570,16 +591,21 @@ public abstract class TileLayer {
                     if (!completed) {
                         log.error("metaTile.writeTileToStream returned false, no tiles saved");
                     }
-
                     if (store) {
                         long[] idx = { gridPos[0], gridPos[1], gridPos[2] };
 
                         TileObject tile = TileObject.createCompleteTileObject(this.getName(), idx,
                                 tileProto.getGridSetId(), tileProto.getMimeType().getFormat(),
                                 tileProto.getParameters(), resource);
+                        tile.setCreated(requestTime);
 
                         try {
-                            tileProto.getStorageBroker().put(tile);
+                            if (tileProto.isMetaTileCacheOnly()) {
+                                tileProto.getStorageBroker().putTransient(tile);
+                            } else {
+                                tileProto.getStorageBroker().put(tile);
+                            }
+                            tileProto.getStorageObject().setCreated(tile.getCreated());
                         } catch (StorageException e) {
                             throw new GeoWebCacheException(e);
                         }

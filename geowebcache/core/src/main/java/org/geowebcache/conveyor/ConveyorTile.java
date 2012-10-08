@@ -56,6 +56,8 @@ public class ConveyorTile extends Conveyor implements TileResponseReceiver {
 
     private Map<String, String> fullParameters;
 
+    private boolean isMetaTileCacheOnly;
+
     public ConveyorTile(StorageBroker sb, String layerId, HttpServletRequest servletReq,
             HttpServletResponse servletResp) {
         super(layerId, sb, servletReq, servletResp);
@@ -216,12 +218,13 @@ public class ConveyorTile extends Conveyor implements TileResponseReceiver {
 
     public boolean retrieve(long maxAge) throws GeoWebCacheException {
         try {
+            if (isMetaTileCacheOnly) {
+                boolean cached = storageBroker.getTransient((TileObject) stObj);
+                this.setCacheResult(cached ? CacheResult.HIT : CacheResult.MISS);
+                return cached;
+            }
             boolean ret = storageBroker.get((TileObject) stObj);
 
-            // Has the tile been explicitly marked as old?
-            if (ret && stObj.getCreated() == -1) {
-                ret = false;
-            } else
             // Do we use expiration, and if so, is the tile recent enough ?
             if (ret && maxAge > 0 && stObj.getCreated() + maxAge < System.currentTimeMillis()) {
                 ret = false;
@@ -265,8 +268,15 @@ public class ConveyorTile extends Conveyor implements TileResponseReceiver {
         return str.toString();
     }
 
-    public long getParametersId() {
+    public String getParametersId() {
         return stObj.getParametersId();
     }
 
+    public void setMetaTileCacheOnly(boolean b) {
+        this.isMetaTileCacheOnly = b;
+    }
+
+    public boolean isMetaTileCacheOnly() {
+        return isMetaTileCacheOnly;
+    }
 }

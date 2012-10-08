@@ -28,16 +28,15 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.geowebcache.GeoWebCacheException;
 import org.geowebcache.config.ConfigurationException;
 import org.geowebcache.diskquota.CacheCleaner.GlobalQuotaResolver;
 import org.geowebcache.diskquota.CacheCleaner.LayerQuotaResolver;
 import org.geowebcache.diskquota.CacheCleaner.QuotaResolver;
-import org.geowebcache.diskquota.storage.BDBQuotaStore;
 import org.geowebcache.diskquota.storage.LayerQuota;
 import org.geowebcache.diskquota.storage.Quota;
 import org.geowebcache.layer.TileLayer;
 import org.geowebcache.layer.TileLayerDispatcher;
-import org.geowebcache.storage.BlobStore;
 import org.geowebcache.storage.DefaultStorageFinder;
 import org.geowebcache.storage.StorageBroker;
 import org.springframework.beans.factory.DisposableBean;
@@ -114,8 +113,6 @@ public class DiskQuotaMonitor implements InitializingBean, DisposableBean {
      *            loads and saves the layers quota config and usage status
      * @param tld
      *            provides access to the layers configured for disk quota insurance
-     * @param sb
-     *            provides a mean to listen to {@link BlobStore} events to keep track of layers disk
      *            quota usage
      * @throws IOException
      * @throws ConfigurationException
@@ -361,8 +358,8 @@ public class DiskQuotaMonitor implements InitializingBean, DisposableBean {
         cacheInfoBuilder = new LayerCacheInfoBuilder(cacheRoot, cleanUpExecutorService,
                 quotaUsageMonitor);
 
-        for (TileLayer tileLayer : tileLayerDispatcher.getLayerList()) {
-            String layerName = tileLayer.getName();
+        for (String layerName : tileLayerDispatcher.getLayerNames()) {
+
             Quota usedQuota = quotaStore.getUsedQuotaByLayerName(layerName);
             if (usedQuota.getBytes().compareTo(BigInteger.ZERO) > 0) {
                 log.debug("Using saved quota information for layer " + layerName + ": "
@@ -370,6 +367,13 @@ public class DiskQuotaMonitor implements InitializingBean, DisposableBean {
             } else {
                 log.debug(layerName + " has no saved used quota information,"
                         + "traversing layer cache to compute its disk usage.");
+                TileLayer tileLayer;
+                try {
+                    tileLayer = tileLayerDispatcher.getTileLayer(layerName);
+                } catch (GeoWebCacheException e) {
+                    e.printStackTrace();
+                    continue;
+                }
                 cacheInfoBuilder.buildCacheInfo(tileLayer);
             }
         }

@@ -56,8 +56,14 @@ public interface Configuration {
 
     /**
      * @return an unmodifiable list of layers, may be empty, but not null.
+     * @deprecated
      */
     public List<? extends TileLayer> getTileLayers();
+
+    /**
+     * @return an unmodifiable list of layers, may be empty, but not null.
+     */
+    public Iterable<? extends TileLayer> getLayers();
 
     /**
      * @return non null identifier for this configuration
@@ -69,12 +75,20 @@ public interface Configuration {
     public boolean isRuntimeStatsEnabled();
 
     /**
-     * @param layerIdent
+     * @param layerName
      *            the layer name
      * @return the layer named {@code layerIdent} or {@code null} if no such layer exists in this
      *         configuration
      */
-    public TileLayer getTileLayer(String layerIdent);
+    public TileLayer getTileLayer(String layerName);
+
+    /**
+     * @param layerId
+     *            the layer identifier
+     * @return the layer identified by {@code layerId} or {@code null} if no such layer exists in
+     *         this configuration
+     */
+    public TileLayer getTileLayerById(String layerId);
 
     public int getTileLayerCount();
 
@@ -95,4 +109,27 @@ public interface Configuration {
      */
     public void save() throws IOException;
 
+    /**
+     * @param tl
+     *            a tile layer to be added or saved
+     * @return {@code true} if this configuration is capable of saving the given tile layer,
+     *         {@code false} otherwise (usually this check is based on an instanceof check, as
+     *         different configurations may be specialized on different kinds of layers).
+     */
+    public boolean canSave(TileLayer tl);
+
+    /**
+     * Adds, but not saves, the given tile layer to this configuration, provided
+     * {@link #canSave(TileLayer) canSave(tl) == true}.
+     * 
+     * @param tl
+     *            the tile layer to add to the configuration
+     * @throws IllegalArgumentException
+     *             if this configuration is not able of saving the specific type of layer given, or
+     *             if any required piece of information is missing or invalid in the layer (for
+     *             example, a missing or duplicated name or id, etc).
+     */
+    public void addLayer(TileLayer tl) throws IllegalArgumentException;
+
+    public boolean containsLayer(String tileLayerId);
 }

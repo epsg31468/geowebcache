@@ -6,21 +6,23 @@
   <groupId>org.geowebcache</groupId>
   <artifactId>geowebcache</artifactId>
   <packaging>pom</packaging>
-  <version>1.3-SNAPSHOT</version>
+  <version>1.4-SNAPSHOT</version>
   <name>geowebcache</name>
   <url>http://geowebcache.org</url>
 
   <properties>
-    <gt.version>2.7-SNAPSHOT</gt.version>
-    <jts.version>1.11</jts.version>
+    <gt.version>2.7.5</gt.version>
+    <jts.version>1.12</jts.version>
     <spring.version>2.5.5</spring.version>
     <restlet.version>1.0.8</restlet.version>
     <xstream.version>1.3.1</xstream.version>
     <acegi.version>1.0.7</acegi.version>
     <commons-logging.version>1.1.1</commons-logging.version>
-    <commons-io.version>1.3.2</commons-io.version>
+    <commons-io.version>2.1</commons-io.version>
+    <commons-dbcp.version>1.3</commons-dbcp.version>
     <commons-lang.version>2.4</commons-lang.version>
     <commons-collections.version>3.1</commons-collections.version>
+    <guava.version>11.0.1</guava.version>
     <log4j.version>1.2.14</log4j.version>
     <h2.version>1.1.119</h2.version>
     <java.awt.headless>true</java.awt.headless>
@@ -97,6 +99,12 @@
     </dependency>
     
     <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>${guava.version}</version>
+    </dependency>
+
+    <dependency>
       <groupId>commons-logging</groupId>
       <artifactId>commons-logging</artifactId>
       <version>${commons-logging.version}</version>
@@ -106,6 +114,11 @@
 	  <artifactId>avalon-framework</artifactId>
 	</exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>commons-dbcp</groupId>
+      <artifactId>commons-dbcp</artifactId>
+      <version>${commons-dbcp.version}</version>
     </dependency>
     <dependency>
       <groupId>commons-io</groupId>
@@ -185,18 +198,11 @@
       <version>0.3.1</version>
       <scope>test</scope>
     </dependency>
-    
-    <!-- dependency>
-	 <groupId>jdom</groupId>
-	 <artifactId>jdom</artifactId>
-	 <version>1.0</version>
-	 <exclusions>
-	   <exclusion>
-	     <groupId>xerces</groupId>
-	     <artifactId>xerces</artifactId>
-	   </exclusion>
-	 </exclusions>
-    </dependency -->
+    <dependency>
+      <groupId>xmlunit</groupId>
+      <artifactId>xmlunit</artifactId>
+      <version>1.3</version>
+    </dependency>
     
     <!-- Spring dependencies -->
     <dependency>
@@ -257,6 +263,12 @@
       </exclusions>
     </dependency>
 
+    <dependency>
+     <groupId>org.freemarker</groupId>
+     <artifactId>freemarker</artifactId>
+     <version>2.3.18</version> <!-- track same version than GeoServer -->
+    </dependency>
+
     <!-- restlet.org dependencies -->
     <dependency>
       <groupId>org.restlet</groupId>
@@ -276,11 +288,11 @@
       <version>${restlet.version}</version>
     </dependency>
     
-    <!-- dependency>
+    <dependency>
       <groupId>org.restlet</groupId>
       <artifactId>org.restlet.ext.freemarker</artifactId>
       <version>${restlet.version}</version>
-    </dependency -->
+    </dependency>
     
     <dependency>
       <groupId>org.restlet</groupId>
@@ -426,7 +438,7 @@
             <descriptor>release/war.xml</descriptor>
             <descriptor>release/doc.xml</descriptor>
           </descriptors>
-          <finalName>geowebcache-1.3-SNAPSHOT</finalName>
+          <finalName>geowebcache-1.4-SNAPSHOT</finalName>
           <outputDirectory>${project.build.directory}/release</outputDirectory>
         </configuration>
       </plugin>
@@ -480,7 +492,7 @@
               <Specification-Version>${project.version}</Specification-Version>
               <Specification-Vendor>${pom.url}</Specification-Vendor>
               <Implementation-Title>org.geowebcache</Implementation-Title>
-              <Implementation-Version>${buildNumber}</Implementation-Version>
+              <Implementation-Version>${build.branch}/${build.commit.id}</Implementation-Version>
               <Implementation-Vendor>${pom.url}</Implementation-Vendor>
             </manifestEntries>
           </archive>
@@ -526,6 +538,25 @@
         <configuration>
           <forkMode>pertest</forkMode>
           <argLine>${maven.test.jvmargs}</argLine>
+        </configuration>
+      </plugin>
+
+      <!-- initialize git revision info -->
+      <plugin>
+        <groupId>pl.project13.maven</groupId>
+        <artifactId>git-commit-id-plugin</artifactId>
+        <version>2.0.4</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>revision</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <prefix>build</prefix>
+          <failOnNoGitDirectory>false</failOnNoGitDirectory>
+          <skipPoms>false</skipPoms>
         </configuration>
       </plugin>
 

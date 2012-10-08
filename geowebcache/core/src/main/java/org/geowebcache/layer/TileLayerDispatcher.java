@@ -20,7 +20,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Set;
 
 import org.apache.commons.logging.Log;
@@ -34,10 +33,9 @@ import org.geowebcache.config.meta.ServiceInformation;
 import org.geowebcache.grid.GridSet;
 import org.geowebcache.grid.GridSetBroker;
 import org.geowebcache.grid.GridSubset;
+import org.geowebcache.util.CompositeIterable;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.util.Assert;
-
-import com.sun.org.apache.xerces.internal.xni.parser.XMLConfigurationException;
 
 /**
  * Serves tile layers from the {@link Configuration}s available in the application context.
@@ -87,22 +85,22 @@ public class TileLayerDispatcher implements DisposableBean {
     }
 
     /**
-     * Returns the layer named after the {@code layerIdent} parameter.
+     * Returns the layer named after the {@code layerName} parameter.
      * 
      * @throws GeoWebCacheException
      *             if no such layer exists
      */
-    public TileLayer getTileLayer(final String layerIdent) throws GeoWebCacheException {
+    public TileLayer getTileLayer(final String layerName) throws GeoWebCacheException {
 
         for (int i = 0; i < configs.size(); i++) {
             Configuration configuration = configs.get(i);
-            TileLayer layer = configuration.getTileLayer(layerIdent);
+            TileLayer layer = configuration.getTileLayer(layerName);
             if (layer != null) {
                 return layer;
             }
         }
         throw new GeoWebCacheException("Thread " + Thread.currentThread().getId()
-                + " Unknown layer " + layerIdent + ". Check the logfiles,"
+                + " Unknown layer " + layerName + ". Check the logfiles,"
                 + " it may not have loaded properly.");
     }
 
@@ -147,13 +145,16 @@ public class TileLayerDispatcher implements DisposableBean {
      * 
      * @return a list view of this tile layer dispatcher's internal layers
      */
+    @SuppressWarnings("unchecked")
     public Iterable<TileLayer> getLayerList() {
-        ArrayList<TileLayer> layers = new ArrayList<TileLayer>();
-        for (int i = 0; i < configs.size(); i++) {
-            Configuration configuration = configs.get(i);
-            layers.addAll(configuration.getTileLayers());
+        List<Iterable<TileLayer>> perConfigLayers = new ArrayList<Iterable<TileLayer>>(
+                configs.size());
+
+        for (Configuration config : configs) {
+            perConfigLayers.add((Iterable<TileLayer>) config.getLayers());
         }
-        return layers;
+
+        return new CompositeIterable<TileLayer>(perConfigLayers);
     }
 
     private void initialize() {
@@ -213,54 +214,97 @@ public class TileLayerDispatcher implements DisposableBean {
         //
     }
 
-    public boolean removeLayer(final String layerName) throws IOException {
+    /**
+     * Finds out which {@link Configuration} contains the given layer,
+     * {@link Configuration#removeLayer(String) removes} it, and returns the configuration, without
+     * saving it.
+     * <p>
+     * The calling code is responsible from calling {@link Configuration#save()} on the returned
+     * configuration object if the change is to be made persistent.
+     * </p>
+     * 
+     * @param layerName
+     *            the name of the layer to remove
+     * @return the Configuration from which the layer has been removed, or {@code null} if no
+     *         configuration contained such a layer
+     */
+    public synchronized Configuration removeLayer(final String layerName)
+            throws IllegalArgumentException {
         for (Configuration config : configs) {
             if (config.removeLayer(layerName)) {
-                config.save();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Replaces and saves the given layer
-     * 
-     * @param tl
-     * @throws NoSuchElementException
-     * @throws IOException
-     */
-    public synchronized void modify(final TileLayer tl) throws NoSuchElementException, IOException {
-        if (!layerExists(tl.getName())) {
-            throw new NoSuchElementException("No layer named " + tl.getName() + " exists");
-        }
-        Configuration config = getConfiguration(tl);
-        config.modifyLayer(tl);
-        config.save();
-    }
-
-    private Configuration getConfiguration(TileLayer tl) {
-        for (Configuration c : configs) {
-            if (null != c.getTileLayer(tl.getName())) {
-                return c;
+                return config;
             }
         }
         return null;
     }
 
     /**
-     * Eliminates the gridset from the {@link GridSetBroker} and the
-     * {@link XMLConfigurationException} and saves the configuration, only if no layer references
-     * the given GridSet.
+     * Adds a layer and returns (but doesn't save) the {@link Configuration} to which the layer was
+     * added.
+     * 
+     * @param tl
+     *            the layer to add
+     * @return the configuration to which the layer was added; calling code is in charge of decising
+     *         whether to {@link Configuration#save() save} the configuration permanently or not.
+     * @throws IllegalArgumentException
+     *             if the given tile layer can't be added to any configuraion managed by this tile
+     *             layer dispatcher.
+     */
+    public synchronized Configuration addLayer(final TileLayer tl) throws IllegalArgumentException {
+        for (Configuration c : configs) {
+            if (c.canSave(tl)) {
+                c.addLayer(tl);
+                return c;
+            }
+        }
+        throw new IllegalArgumentException("No configuration found capable of saving " + tl);
+    }
+
+    /**
+     * Replaces the given layer and returns the Layer's configuration, does not save the
+     * configuration, the calling code shall do that if the change is to be made persistent.
+     * 
+     * @param tl
+     * @throws IllegalArgumentException
+     */
+    public synchronized Configuration modify(final TileLayer tl) throws IllegalArgumentException {
+        Configuration config = getConfiguration(tl);
+        config.modifyLayer(tl);
+        return config;
+    }
+
+    public Configuration getConfiguration(TileLayer tl) throws IllegalArgumentException {
+        Assert.notNull(tl, "layer is null");
+        return getConfiguration(tl.getId());
+    }
+
+    public Configuration getConfiguration(final String tileLayerId) throws IllegalArgumentException {
+        Assert.notNull(tileLayerId, "tileLayerId is null");
+        for (Configuration c : configs) {
+            if (c.containsLayer(tileLayerId)) {
+                return c;
+            }
+        }
+        throw new IllegalArgumentException("No configuration found containing layer " + tileLayerId);
+    }
+
+    /**
+     * Eliminates the gridset from the {@link GridSetBroker} and the {@link XMLConfiguration} only
+     * if no layer references the given GridSet.
+     * <p>
+     * NOTE this method does not save the configuration, it's up to the calling code to do that in
+     * order to make the change persistent.
+     * </p>
      * 
      * @param gridSetName
      *            the gridset to remove.
-     * @return the removed gridset
+     * @return the configuration modified after removing the gridset, or {@code null}
      * @throws IllegalStateException
      *             if there's any layer referencing the given GridSet
      * @throws IOException
+     * @see {@link GridSetBroker#remove(String)}
      */
-    public synchronized GridSet removeGridset(final String gridSetName)
+    public synchronized Configuration removeGridset(final String gridSetName)
             throws IllegalStateException, IOException {
 
         GridSet gridSet = gridSetBroker.get(gridSetName);
@@ -282,8 +326,8 @@ public class TileLayerDispatcher implements DisposableBean {
         GridSet removed = gridSetBroker.remove(gridSetName);
         Assert.notNull(removed != null);
         Assert.notNull(persistingConfig.removeGridset(gridSetName));
-        persistingConfig.save();
-        return removed;
+
+        return persistingConfig;
     }
 
     public synchronized void addGridSet(final GridSet gridSet) throws IllegalArgumentException,
@@ -291,6 +335,10 @@ public class TileLayerDispatcher implements DisposableBean {
         if (null != gridSetBroker.get(gridSet.getName())) {
             throw new IllegalArgumentException("GridSet " + gridSet.getName() + " already exists");
         }
+        saveGridSet(gridSet);
+    }
+
+    private void saveGridSet(final GridSet gridSet) throws IOException {
         XMLConfiguration persistingConfig = getXmlConfiguration();
         persistingConfig.addOrReplaceGridSet(new XMLGridSet(gridSet));
         persistingConfig.save();

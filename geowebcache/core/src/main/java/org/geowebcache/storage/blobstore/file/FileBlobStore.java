@@ -17,7 +17,10 @@
  */
 package org.geowebcache.storage.blobstore.file;
 
+import static org.geowebcache.storage.blobstore.file.FilePathUtils.*;
+
 import java.io.File;
+import java.io.FileFilter;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -28,6 +31,7 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.channels.FileChannel;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -43,6 +47,7 @@ import org.geowebcache.storage.BlobStoreListener;
 import org.geowebcache.storage.BlobStoreListenerList;
 import org.geowebcache.storage.DefaultStorageFinder;
 import org.geowebcache.storage.StorageException;
+import org.geowebcache.storage.StorageObject.Status;
 import org.geowebcache.storage.TileObject;
 import org.geowebcache.storage.TileRange;
 import org.springframework.scheduling.concurrent.CustomizableThreadFactory;
@@ -63,22 +68,34 @@ public class FileBlobStore implements BlobStore {
 
     private final BlobStoreListenerList listeners = new BlobStoreListenerList();
 
+    private FilePathGenerator pathGenerator;
+
+    private File tmp;
+
     private static ExecutorService deleteExecutorService;
 
-    public FileBlobStore(DefaultStorageFinder defStoreFinder) throws ConfigurationException {
-        path = defStoreFinder.getDefaultPath();
-        stagingArea = new File(path, "_gwc_in_progress_deletes_");
-        createDeleteExecutorService();
-        issuePendingDeletes();
+    public FileBlobStore(DefaultStorageFinder defStoreFinder) throws StorageException, ConfigurationException {
+        this(defStoreFinder.getDefaultPath());
     }
 
     public FileBlobStore(String rootPath) throws StorageException {
         path = rootPath;
-        File fh = new File(path);
+        pathGenerator = new FilePathGenerator(this.path);
 
+        // prepare the root
+        File fh = new File(path);
+        fh.mkdirs();
         if (!fh.exists() || !fh.isDirectory() || !fh.canWrite()) {
             throw new StorageException(path + " is not writable directory.");
         }
+        
+        // and the temporary directory
+        tmp = new File(path, "tmp");
+        tmp.mkdirs();
+        if (!tmp.exists() || !tmp.isDirectory() || !tmp.canWrite()) {
+            throw new StorageException(tmp.getPath() + " is not writable directory.");
+        }
+        
         stagingArea = new File(path, "_gwc_in_progress_deletes_");
         createDeleteExecutorService();
         issuePendingDeletes();
@@ -170,32 +187,79 @@ public class FileBlobStore implements BlobStore {
 
     }
 
+    /**
+     * @see org.geowebcache.storage.BlobStore#delete(java.lang.String)
+     */
     public boolean delete(final String layerName) throws StorageException {
-        final File layerPath = getLayerPath(layerName);
+        final File source = getLayerPath(layerName);
+        final String target = filteredLayerName(layerName);
 
-        if (!layerPath.exists() || !layerPath.canWrite()) {
-            log.info(layerPath + " does not exist or is not writable");
+        boolean ret = stageDelete(source, target);
+
+        this.listeners.sendLayerDeleted(layerName);
+        return ret;
+    }
+
+    private boolean stageDelete(final File source, final String targetName) throws StorageException {
+
+        if (!source.exists() || !source.canWrite()) {
+            log.info(source + " does not exist or is not writable");
             return false;
         }
+
         if (!stagingArea.exists() && !stagingArea.mkdirs()) {
             throw new StorageException("Can't create staging directory for deletes: "
                     + stagingArea.getAbsolutePath());
         }
-        String dirName = FilePathGenerator.filteredLayerName(layerName);
-        File tmpFolder = new File(stagingArea, dirName);
+
+        File tmpFolder = new File(stagingArea, targetName);
         int tries = 0;
         while (tmpFolder.exists()) {
             ++tries;
-            dirName = FilePathGenerator.filteredLayerName(layerName + "." + tries);
-            tmpFolder = new File(layerPath.getParentFile(), dirName);
+            String dirName = filteredLayerName(targetName + "." + tries);
+            tmpFolder = new File(stagingArea, dirName);
         }
-        boolean renamed = layerPath.renameTo(tmpFolder);
+        boolean renamed = source.renameTo(tmpFolder);
         if (!renamed) {
-            throw new IllegalStateException("Can't rename " + layerPath.getAbsolutePath() + " to "
+            throw new IllegalStateException("Can't rename " + source.getAbsolutePath() + " to "
                     + tmpFolder.getAbsolutePath() + " for deletion");
         }
         deletePending(tmpFolder);
-        this.listeners.sendLayerDeleted(layerName);
+        return true;
+    }
+
+    /**
+     * @throws StorageException
+     * @see org.geowebcache.storage.BlobStore#deleteByGridsetId(java.lang.String, java.lang.String)
+     */
+    public boolean deleteByGridsetId(final String layerName, final String gridSetId)
+            throws StorageException {
+
+        final File layerPath = getLayerPath(layerName);
+        if (!layerPath.exists() || !layerPath.canWrite()) {
+            log.info(layerPath + " does not exist or is not writable");
+            return false;
+        }
+        final String filteredGridSetId = filteredGridSetId(gridSetId);
+
+        File[] gridSubsetCaches = layerPath.listFiles(new FileFilter() {
+            public boolean accept(File pathname) {
+                if (!pathname.isDirectory()) {
+                    return false;
+                }
+                String dirName = pathname.getName();
+                return dirName.startsWith(filteredGridSetId);
+            }
+        });
+
+        for (File gridSubsetCache : gridSubsetCaches) {
+            String target = filteredLayerName(layerName) + "_"
+                    + gridSubsetCache.getName();
+            stageDelete(gridSubsetCache, target);
+        }
+
+        listeners.sendGridSubsetDeleted(layerName, gridSetId);
+
         return true;
     }
 
@@ -237,7 +301,7 @@ public class FileBlobStore implements BlobStore {
     }
 
     private File getLayerPath(String layerName) {
-        String prefix = path + File.separator + FilePathGenerator.filteredLayerName(layerName);
+        String prefix = path + File.separator + filteredLayerName(layerName);
 
         File layerPath = new File(prefix);
         return layerPath;
@@ -275,7 +339,7 @@ public class FileBlobStore implements BlobStore {
         int count = 0;
 
         String prefix = path + File.separator
-                + FilePathGenerator.filteredLayerName(trObj.layerName);
+                + filteredLayerName(trObj.getLayerName());
 
         final File layerPath = new File(prefix);
 
@@ -285,22 +349,23 @@ public class FileBlobStore implements BlobStore {
         if (!layerPath.isDirectory() || !layerPath.canWrite()) {
             throw new StorageException(prefix + " does is not a directory or is not writable.");
         }
-        FilePathFilter fpf = new FilePathFilter(trObj);
+        
+        final FilePathFilter tileFinder = new FilePathFilter(trObj);
 
-        final String layerName = trObj.layerName;
-        final String gridSetId = trObj.gridSetId;
-        final String blobFormat = trObj.mimeType.getFormat();
-        // FRD trObj.getParametersId();
-        final Long parametersId = trObj.getParametersId();
+        final String layerName = trObj.getLayerName();
+        final String gridSetId = trObj.getGridSetId();
+        final String blobFormat = trObj.getMimeType().getFormat();
+        final String parametersId = trObj.getParametersId();
 
-        File[] srsZoomDirs = layerPath.listFiles(fpf);
+        File[] srsZoomDirs = layerPath.listFiles(tileFinder);
 
+        final String gridsetPrefix = filteredGridSetId(gridSetId);
         for (File srsZoomParamId : srsZoomDirs) {
-            int zoomLevel = FilePathGenerator.findZoomLevel(srsZoomParamId.getName());
-            File[] intermediates = srsZoomParamId.listFiles(fpf);
+            int zoomLevel = findZoomLevel(gridsetPrefix, srsZoomParamId.getName());
+            File[] intermediates = srsZoomParamId.listFiles(tileFinder);
 
             for (File imd : intermediates) {
-                File[] tiles = imd.listFiles(fpf);
+                File[] tiles = imd.listFiles(tileFinder);
                 long length;
 
                 for (File tile : tiles) {
@@ -334,16 +399,35 @@ public class FileBlobStore implements BlobStore {
         return true;
     }
 
-    public Resource get(TileObject stObj) throws StorageException {
+    public boolean get(TileObject stObj) throws StorageException {
         File fh = getFileHandleTile(stObj, false);
-        return readFile(fh);
+        if(!fh.exists()) {
+            stObj.setStatus(Status.MISS);
+            return false;
+        } else {
+            Resource resource = readFile(fh);
+            stObj.setBlob(resource);
+            stObj.setCreated(resource.getLastModified());
+            stObj.setBlobSize((int) resource.getSize());
+            return true;
+        }
     }
 
     public void put(TileObject stObj) throws StorageException {
         final File fh = getFileHandleTile(stObj, true);
         final long oldSize = fh.length();
         final boolean existed = oldSize > 0;
-        writeFile(fh, stObj.getBlob());
+        writeFile(fh, stObj);
+        // mark the last modification as the tile creation time if set, otherwise
+        // we'll leave it to the writing time
+        if(stObj.getCreated() > 0) {
+            try {
+                fh.setLastModified(stObj.getCreated());
+            } catch(Exception e) {
+                log.debug("Failed to set the last modified time to match the tile request time", e);
+            }
+        } 
+
         /*
          * This is important because listeners may be tracking tile existence
          */
@@ -354,7 +438,7 @@ public class FileBlobStore implements BlobStore {
         }
     }
 
-    private File getFileHandleTile(TileObject stObj, boolean create) {
+    private File getFileHandleTile(TileObject stObj, boolean create) throws StorageException {
         final MimeType mimeType;
         try {
             mimeType = MimeType.createFromFormat(stObj.getBlobFormat());
@@ -363,13 +447,7 @@ public class FileBlobStore implements BlobStore {
             throw new RuntimeException(me);
         }
 
-        final String layerName = stObj.getLayerName();
-        final long[] xyz = stObj.getXYZ();
-        final String gridSetId = stObj.getGridSetId();
-        final long parametersId = stObj.getParametersId();
-
-        final File tilePath = FilePathGenerator.tilePath(path, layerName, xyz, gridSetId, mimeType,
-                parametersId);
+        final File tilePath = pathGenerator.tilePath(stObj, mimeType);
 
         if (create) {
             File parent = tilePath.getParentFile();
@@ -386,27 +464,45 @@ public class FileBlobStore implements BlobStore {
         return new FileResource(fh);
     }
 
-    private void writeFile(File target, Resource source) throws StorageException {
-        // Open the output stream
-        FileOutputStream fos;
+    private void writeFile(File target, TileObject stObj) throws StorageException {
+        // first write to temp file
+        tmp.mkdirs();
+        File temp = new File(tmp, UUID.randomUUID().toString());
+        
         try {
-            fos = new FileOutputStream(target);
-        } catch (FileNotFoundException ioe) {
-            throw new StorageException(ioe.getMessage() + " for " + target.getAbsolutePath());
-        }
-
-        FileChannel channel = fos.getChannel();
-        try {
-            source.transferTo(channel);
-        } catch (IOException ioe) {
-            throw new StorageException(ioe.getMessage() + " for " + target.getAbsolutePath());
-        } finally {
+            // Open the output stream
+            FileOutputStream fos;
             try {
-                channel.close();
-            } catch (IOException ioe) {
+                fos = new FileOutputStream(temp);
+            } catch (FileNotFoundException ioe) {
                 throw new StorageException(ioe.getMessage() + " for " + target.getAbsolutePath());
             }
+    
+            FileChannel channel = fos.getChannel();
+            try {
+                stObj.getBlob().transferTo(channel);
+            } catch (IOException ioe) {
+                throw new StorageException(ioe.getMessage() + " for " + target.getAbsolutePath());
+            } finally {
+                try {
+                    channel.close();
+                } catch (IOException ioe) {
+                    throw new StorageException(ioe.getMessage() + " for " + target.getAbsolutePath());
+                }
+            }
+            
+            // rename to final position. This will fail if another GWC also wrote this
+            // file, in such case we'll just eliminate this one
+            if(temp.renameTo(target)) {
+                temp = null;
+            }
+        } finally {
+            if(temp != null) {
+                log.warn("Tile " + target.getPath() + " was already written by another thread/process");
+                temp.delete();
+            }
         }
+        
     }
 
     public void clear() throws StorageException {

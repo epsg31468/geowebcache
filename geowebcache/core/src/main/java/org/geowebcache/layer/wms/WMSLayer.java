@@ -19,19 +19,16 @@ package org.geowebcache.layer.wms;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
-import java.util.Hashtable;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.geowebcache.GeoWebCacheException;
+import org.geowebcache.config.XMLGridSubset;
+import org.geowebcache.conveyor.Conveyor.CacheResult;
 import org.geowebcache.conveyor.ConveyorTile;
 import org.geowebcache.filter.parameters.ParameterFilter;
 import org.geowebcache.filter.request.RequestFilter;
@@ -44,8 +41,8 @@ import org.geowebcache.io.ByteArrayResource;
 import org.geowebcache.io.Resource;
 import org.geowebcache.layer.AbstractTileLayer;
 import org.geowebcache.layer.ExpirationRule;
-import org.geowebcache.layer.GridLocObj;
 import org.geowebcache.layer.meta.LayerMetaInformation;
+import org.geowebcache.locks.LockProvider;
 import org.geowebcache.mime.FormatModifier;
 import org.geowebcache.mime.MimeType;
 import org.geowebcache.mime.XMLMime;
@@ -56,15 +53,17 @@ import org.geowebcache.util.GWCVars;
  */
 public class WMSLayer extends AbstractTileLayer {
 
+    private static Log log = LogFactory.getLog(org.geowebcache.layer.wms.WMSLayer.class);
+
     public enum RequestType {
         MAP, FEATUREINFO
     };
 
-    private String[] wmsUrl = null;
+    private String[] wmsUrl;
 
-    private Integer concurrency = null;
+    private String wmsLayers;
 
-    private String wmsLayers = null;
+    protected String wmsStyles;
 
     protected Integer gutter;
 
@@ -94,7 +93,7 @@ public class WMSLayer extends AbstractTileLayer {
     @SuppressWarnings("unused")
     private String cachePrefix;
 
-    protected String sphericalMercatorOverride;
+    private Integer concurrency;
 
     // private transient int expireCacheInt = -1;
 
@@ -102,20 +101,16 @@ public class WMSLayer extends AbstractTileLayer {
 
     private transient int curWmsURL;
 
-    private transient Lock layerLock;
+    private transient WMSSourceHelper sourceHelper;
 
-    private transient boolean layerLocked;
+    protected transient String sphericalMercatorOverride;
 
-    private transient Condition layerLockedCond;
+    private transient LockProvider lockProvider;
 
-    private transient Condition[] gridLocConds;
-
-    private transient HashMap<GridLocObj, Boolean> procQueue;
-
-    private transient WMSSourceHelper sourceHelper = null;
-
-    private static transient Log log = LogFactory.getLog(org.geowebcache.layer.wms.WMSLayer.class);
-
+    WMSLayer() {
+        //default constructor for XStream
+    }
+    
     /**
      * Note XStream uses reflection, this is only used for testing and loading from getCapabilities
      * 
@@ -130,7 +125,7 @@ public class WMSLayer extends AbstractTileLayer {
      * @param vendorParams
      */
     public WMSLayer(String layerName, String[] wmsURL, String wmsStyles, String wmsLayers,
-            List<String> mimeFormats, Hashtable<String, GridSubset> subSets,
+            List<String> mimeFormats, Map<String, GridSubset> subSets,
             List<ParameterFilter> parameterFilters, int[] metaWidthHeight, String vendorParams,
             boolean queryable) {
 
@@ -140,6 +135,12 @@ public class WMSLayer extends AbstractTileLayer {
         this.wmsStyles = wmsStyles;
         this.mimeFormats = mimeFormats == null ? null : new ArrayList<String>(mimeFormats);
         this.subSets = subSets;
+        this.gridSubsets = new ArrayList<XMLGridSubset>();
+        if (subSets != null) {
+            for (GridSubset subset : subSets.values()) {
+                gridSubsets.add(new XMLGridSubset(subset));
+            }
+        }
         this.parameterFilters = parameterFilters == null ? null : new ArrayList<ParameterFilter>(
                 parameterFilters);
         this.metaWidthHeight = metaWidthHeight;
@@ -148,6 +149,11 @@ public class WMSLayer extends AbstractTileLayer {
         // this.bgColor = "0x000000";
         // this.palette = "test.png";
         this.queryable = queryable;
+    }
+
+    protected WMSLayer readResolve() {
+        super.readResolve();
+        return this;
     }
 
     /**
@@ -170,10 +176,6 @@ public class WMSLayer extends AbstractTileLayer {
             backendTimeout = 120;
         }
 
-        layerLock = new ReentrantLock();
-        layerLockedCond = layerLock.newCondition();
-        procQueue = new HashMap<GridLocObj, Boolean>();
-
         if (this.metaWidthHeight == null || this.metaWidthHeight.length != 2) {
             this.metaWidthHeight = new int[2];
             this.metaWidthHeight[0] = 3;
@@ -183,13 +185,6 @@ public class WMSLayer extends AbstractTileLayer {
         // Create conditions for tile locking
         if (concurrency == null) {
             concurrency = 32;
-        }
-
-        // TODO There should be a WMSServer object and it should be on that
-        this.gridLocConds = new Condition[concurrency];
-
-        for (int i = 0; i < gridLocConds.length; i++) {
-            gridLocConds[i] = layerLock.newCondition();
         }
 
         if (this.sourceHelper instanceof WMSHttpHelper) {
@@ -254,11 +249,13 @@ public class WMSLayer extends AbstractTileLayer {
 
         long[] gridLoc = tile.getTileIndex();
 
+        GridSubset gridSubset = getGridSubset(tileGridSetId);
         // Final preflight check, throws exception if necessary
-        getGridSubset(tileGridSetId).checkCoverage(gridLoc);
+        gridSubset.checkCoverage(gridLoc);
 
         ConveyorTile returnTile;
 
+        tile.setMetaTileCacheOnly(!gridSubset.shouldCacheAtZoom(gridLoc[2]));
         try {
             if (tryCacheFetch(tile)) {
                 returnTile = finalizeTile(tile);
@@ -270,7 +267,7 @@ public class WMSLayer extends AbstractTileLayer {
         } finally {
             cleanUpThreadLocals();
         }
-
+        
         sendTileRequestedEvent(returnTile);
 
         return returnTile;
@@ -281,11 +278,14 @@ public class WMSLayer extends AbstractTileLayer {
      */
     public void seedTile(ConveyorTile tile, boolean tryCache) throws GeoWebCacheException,
             IOException {
-        if (tile.getMimeType().supportsTiling()
-                && (metaWidthHeight[0] > 1 || metaWidthHeight[1] > 1)) {
-            getMetatilingReponse(tile, tryCache);
-        } else {
-            getNonMetatilingReponse(tile, tryCache);
+        GridSubset gridSubset = getGridSubset(tile.getGridSetId());
+        if (gridSubset.shouldCacheAtZoom(tile.getTileIndex()[2])) {
+            if (tile.getMimeType().supportsTiling()
+                    && (metaWidthHeight[0] > 1 || metaWidthHeight[1] > 1)) {
+                getMetatilingReponse(tile, tryCache);
+            } else {
+                getNonMetatilingReponse(tile, tryCache);
+            }
         }
     }
 
@@ -322,30 +322,31 @@ public class WMSLayer extends AbstractTileLayer {
             metaTile.setExpiresHeader(GWCVars.CACHE_USE_WMS_BACKEND_VALUE);
         }
 
-        long[] metaGridLoc = metaTile.getMetaGridPos();
-        GridLocObj metaGlo = new GridLocObj(metaGridLoc, this.gridLocConds.length);
-
-        /** ****************** Acquire lock ******************* */
-        waitForQueue(metaGlo);
-        /** ****************** Check cache again ************** */
-        if (tryCache && tryCacheFetch(tile)) {
-            // Someone got it already, return lock and we're done
-            removeFromQueue(metaGlo);
-            return finalizeTile(tile);
-        }
-
-        /*
-         * This thread's byte buffer
-         */
-        ByteArrayResource buffer = getImageBuffer(WMS_BUFFER);
-
+        String metaKey = buildLockKey(tile, metaTile);
+        boolean lockAcquired = false;
         try {
+            /** ****************** Acquire lock ******************* */
+            lockProvider.getLock(metaKey);
+            lockAcquired = true;
+            /** ****************** Check cache again ************** */
+            if (tryCache && tryCacheFetch(tile)) {
+                // Someone got it already, return lock and we're done
+                return finalizeTile(tile);
+            }
+    
+            tile.setCacheResult(CacheResult.MISS);
+            
+            /*
+             * This thread's byte buffer
+             */
+            ByteArrayResource buffer = getImageBuffer(WMS_BUFFER);
+
             /** ****************** No luck, Request metatile ****** */
             // Leave a hint to save expiration, if necessary
             if (saveExpirationHeaders) {
                 metaTile.setExpiresHeader(GWCVars.CACHE_USE_WMS_BACKEND_VALUE);
             }
-
+            long requestTime = System.currentTimeMillis();
             sourceHelper.makeRequest(metaTile, buffer);
 
             if (metaTile.getError()) {
@@ -360,14 +361,42 @@ public class WMSLayer extends AbstractTileLayer {
 
             metaTile.setImageBytes(buffer);
 
-            saveTiles(metaTile, tile);
+            saveTiles(metaTile, tile, requestTime);
 
             /** ****************** Return lock and response ****** */
         } finally {
-            removeFromQueue(metaGlo);
+            if(lockAcquired) {
+                lockProvider.releaseLock(metaKey);
+            }
             metaTile.dispose();
         }
         return finalizeTile(tile);
+    }
+
+    private String buildLockKey(ConveyorTile tile, WMSMetaTile metaTile) {
+        StringBuilder metaKey = new StringBuilder();
+        
+        final long[] tileIndex;
+        if(metaTile != null) {
+            tileIndex = metaTile.getMetaGridPos();
+            metaKey.append("meta_");
+        } else {
+            tileIndex = tile.getTileIndex();
+            metaKey.append("tile_");
+        }
+        long x = tileIndex[0];
+        long y = tileIndex[1];
+        long z = tileIndex[2];
+
+        metaKey.append(tile.getLayerId());
+        metaKey.append("_").append(tile.getGridSetId());
+        metaKey.append("_").append(x).append("_").append(y).append("_").append(z);
+        if(tile.getParametersId() != null) {
+            metaKey.append("_").append(tile.getParametersId());
+        }            
+        metaKey.append(".").append(tile.getMimeType().getFileExtension());
+
+        return metaKey.toString();
     }
 
     /**
@@ -383,18 +412,18 @@ public class WMSLayer extends AbstractTileLayer {
             throws GeoWebCacheException {
         // String debugHeadersStr = null;
         long[] gridLoc = tile.getTileIndex();
-        GridLocObj glo = new GridLocObj(gridLoc, this.gridLocConds.length);
 
-        /** ****************** Acquire lock ******************* */
-        waitForQueue(glo);
+        String lockKey = buildLockKey(tile, null);
+        boolean lockAcquired = false;
         try {
+            /** ****************** Acquire lock ******************* */
+            lockProvider.getLock(lockKey);
+            lockAcquired = true;
+            
             /** ****************** Check cache again ************** */
             if (tryCache && tryCacheFetch(tile)) {
                 // Someone got it already, return lock and we're done
-                removeFromQueue(glo);
                 return tile;
-                // return this.createTileResponse(tile.getData(), -1, mime,
-                // response);
             }
 
             /** ****************** Tile ******************* */
@@ -418,7 +447,9 @@ public class WMSLayer extends AbstractTileLayer {
 
             /** ****************** Return lock and response ****** */
         } finally {
-            removeFromQueue(glo);
+            if(lockAcquired) {
+                lockProvider.releaseLock(lockKey);
+            }
         }
         return finalizeTile(tile);
     }
@@ -435,10 +466,6 @@ public class WMSLayer extends AbstractTileLayer {
             }
         }
         return false;
-    }
-
-    public void setTileIndexHeader(ConveyorTile tile) {
-        tile.servletResp.addHeader("geowebcache-tile-index", Arrays.toString(tile.getTileIndex()));
     }
 
     public ConveyorTile doNonMetatilingRequest(ConveyorTile tile) throws GeoWebCacheException {
@@ -462,7 +489,6 @@ public class WMSLayer extends AbstractTileLayer {
 
         if (tile.servletResp != null) {
             setExpirationHeader(tile.servletResp, (int) tile.getTileIndex()[2]);
-            setTileIndexHeader(tile);
         }
 
         return tile;
@@ -610,109 +636,6 @@ public class WMSLayer extends AbstractTileLayer {
         return null;
     }
 
-    /**
-     * Acquires lock for the entire layer, returns only after all other requests that could write to
-     * the queue have finished
-     */
-    public void acquireLayerLock() {
-        if (layerLock == null) {
-            layerLocked = true;
-            return;
-        }
-
-        boolean wait = true;
-        // Wait until the queue is free
-        while (wait) {
-            try {
-                layerLock.lock();
-                this.layerLocked = true;
-                if (this.procQueue == null || this.procQueue.size() == 0) {
-                    wait = false;
-                }
-            } finally {
-                layerLock.unlock();
-            }
-        }
-    }
-
-    /**
-     * Releases lock for the entire layer, signals threads that have been kept waiting
-     */
-    public void releaseLayerLock() {
-        if (layerLock == null) {
-            layerLocked = false;
-            return;
-        }
-
-        layerLock.lock();
-        try {
-            layerLocked = false;
-            // Wake everyone up
-            layerLockedCond.signalAll();
-        } finally {
-            layerLock.unlock();
-        }
-    }
-
-    /**
-     * 
-     * @param metaGridLoc
-     * @return
-     */
-    protected boolean waitForQueue(GridLocObj glo) {
-        boolean retry = true;
-        boolean hasWaited = false;
-        // int condIdx = getLocCondIdx(gridLoc);
-
-        while (retry) {
-            layerLock.lock();
-            try {
-                // Check for global lock
-                if (layerLocked) {
-                    this.layerLockedCond.await();
-                } else if (this.procQueue.containsKey(glo)) {
-                    // System.out.println(Thread.currentThread().getId()
-                    // + " WAITING FOR "+glo.toString()+ " convar " + condIdx);
-                    hasWaited = true;
-                    this.gridLocConds[glo.hashCode()].await();
-                    // System.out.println(Thread.currentThread().getId()
-                    // + " WAKING UP "+glo.toString()+ " convar " + condIdx);
-                } else {
-                    this.procQueue.put(glo, true);
-                    retry = false;
-                    // System.out.println(Thread.currentThread().getId()
-                    // + " CONTINUES "+glo.toString()+ " convar " + condIdx);
-                }
-            } catch (InterruptedException ie) {
-                // Do we care? Maybe if the program is about to shut down
-            } finally {
-                layerLock.unlock();
-            }
-        }
-
-        return hasWaited;
-    }
-
-    /**
-     * Synchronization function, ensures that the same metatile is not requested simultaneously by
-     * two threads.
-     * 
-     * @param gridLoc
-     *            the grid positions of the tile (bottom left of metatile)
-     * @return
-     */
-    protected void removeFromQueue(GridLocObj glo) {
-        layerLock.lock();
-        try {
-            // System.out.println(Thread.currentThread().getId()
-            // + " DONE, SIGNALLING "+glo.toString() + " convar " + condIdx);
-            this.procQueue.remove(glo);
-            this.gridLocConds[glo.hashCode()].signalAll();
-        } finally {
-            layerLock.unlock();
-        }
-    }
-
     public void setErrorMime(String errormime) {
         this.errorMime = errormime;
     }
@@ -729,8 +652,8 @@ public class WMSLayer extends AbstractTileLayer {
     public String[] getWMSurl() {
         return this.wmsUrl;
     }
-    
-    public String getWmsLayers(){
+
+    public String getWmsLayers() {
         return wmsLayers;
     }
 
@@ -752,6 +675,16 @@ public class WMSLayer extends AbstractTileLayer {
     public void setSourceHelper(WMSSourceHelper source) {
         log.debug("Setting sourceHelper on " + this.name);
         this.sourceHelper = source;
+        if(concurrency != null) {
+            this.sourceHelper.setConcurrency(concurrency);
+        } else {
+            this.sourceHelper.setConcurrency(32);
+        }
+        if(backendTimeout != null) {
+            this.sourceHelper.setBackendTimeout(backendTimeout);
+        } else {
+            this.sourceHelper.setBackendTimeout(120);
+        }
     }
 
     public WMSSourceHelper getSourceHelper() {
@@ -811,11 +744,6 @@ public class WMSLayer extends AbstractTileLayer {
         }
     }
 
-    private Object readResolve() {
-        // Not really needed at this point
-        return this;
-    }
-
     public void cleanUpThreadLocals() {
         WMS_BUFFER.remove();
         WMS_BUFFER2.remove();
@@ -823,5 +751,14 @@ public class WMSLayer extends AbstractTileLayer {
 
     public void setMetaInformation(LayerMetaInformation layerMetaInfo) {
         this.metaInformation = layerMetaInfo;
+    }
+
+    @Override
+    public String getStyles() {
+        return wmsStyles;
+    }
+
+    public void setLockProvider(LockProvider lockProvider) {
+        this.lockProvider = lockProvider;
     }
 }

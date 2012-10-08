@@ -17,6 +17,7 @@
  */
 package org.geowebcache.storage.blobstore.file;
 
+import static org.geowebcache.storage.blobstore.file.FilePathUtils.*;
 
 import java.io.File;
 import java.io.FilenameFilter;
@@ -25,117 +26,101 @@ import org.geowebcache.storage.StorageException;
 import org.geowebcache.storage.TileRange;
 
 public class FilePathFilter implements FilenameFilter {
-    String gridSetPrefix = null;
-    String mimeExtension = null;
-    TileRange tr;
-    
+
+    private final String gridSetPrefix;
+
+    private String mimeExtension;
+
+    private TileRange tr;
+
     public FilePathFilter(TileRange trObj) throws StorageException {
         this.tr = trObj;
-        
-        if(tr.gridSetId == null) {
+
+        if (tr.getGridSetId() == null) {
             throw new StorageException("Specifying the grid set id is currently mandatory.");
         }
-       
-        gridSetPrefix = FilePathGenerator.filteredGridSetId(tr.gridSetId);
 
-        if(tr.mimeType != null) {
-            mimeExtension = tr.mimeType.getFileExtension();
+        gridSetPrefix = filteredGridSetId(tr.getGridSetId());
+
+        if (tr.getMimeType() != null) {
+            mimeExtension = tr.getMimeType().getFileExtension();
         }
     }
 
     /**
-     * Assumes it will get fed something like
-     *  path:             name:
-     *  *EPSG_2163_01/0_0 01_01.png 
-     *  *EPSG_2163_01/    0_0
-     *  *                 EPSG_2163_01
+     * Assumes it will get fed something like path: name: *EPSG_2163_01/0_0 01_01.png *EPSG_2163_01/
+     * 0_0 * EPSG_2163_01
+     * 
+     * @see java.io.FilenameFilter#accept(java.io.File, java.lang.String)
      */
-    public boolean accept(File dir, String name) {
+    public boolean accept(File parent, String fileName) {
         boolean ret;
-        if(name.startsWith(gridSetPrefix)) {
+        if (fileName.startsWith(gridSetPrefix)) {
             // gridset and zoomlevel level
-            ret = acceptZoomLevelDir(name);
-        } else if(name.contains(".")) {
+            ret = acceptZoomLevelDir(fileName);
+        } else if (fileName.contains(".")) {
             // filename
-            ret = acceptFileName(dir, name);
+            ret = acceptFileName(parent, fileName);
         } else {
             // intermediate
-            ret = acceptIntermediateDir(name);
+            ret = acceptIntermediateDir(fileName);
         }
-        
-        //System.out.println(ret + " " + name);
+
+        // System.out.println(ret + " " + name);
         return ret;
     }
-        
+
     /**
-     * Example: EPSG_2163_01, EPSG_2163_01_7 (i.e. {@code <EPSG>_<code>_<zLevel>[_<parametersId>]})
+     * Example: nyc_01, nyc_05_1,EPSG_2163_01, EPSG_2163_01_7 (i.e.
+     * {@code <gridsetPrefix>_<zLevel>[_<parametersId>]})
      */
     private boolean acceptZoomLevelDir(String name) {
-        if(! name.startsWith(gridSetPrefix)) {
+        if (!name.startsWith(gridSetPrefix)) {
             return false;
         }
-        
-        if(tr.zoomStart == -1 && tr.zoomStop == -1) {
+
+        if (tr.getZoomStart() == -1 && tr.getZoomStop() == -1) {
             // All zoomlevels
+            return true;
         } else {
-            int tmp = FilePathGenerator.findZoomLevel(name);
-            if(tmp < tr.zoomStart || tmp > tr.zoomStop) {
+            int tmp = findZoomLevel(gridSetPrefix, name);
+            if (tmp < tr.getZoomStart() || tmp > tr.getZoomStop()) {
                 return false;
             }
         }
-        
-        return true;   
+
+        return true;
     }
-    
+
     private boolean acceptIntermediateDir(String name) {
-        //if(bounds == null) {
-        //    return true;
-        //}
-        
+        // if(bounds == null) {
+        // return true;
+        // }
+
         // For now we'll do all of them,
         // otherwise we have to extract zoomlevel from path
         return true;
     }
-    
-    private boolean acceptFileName(File dir, String name) {
+
+    private boolean acceptFileName(File parent, String name) {
         String[] parts = name.split("\\.");
 
         // Check mime type
-        
-        if(! parts[parts.length - 1].equalsIgnoreCase(this.mimeExtension)) {
+
+        if (!parts[parts.length - 1].equalsIgnoreCase(this.mimeExtension)) {
             return false;
         }
-        
-        //if (mimeExtension != null) {
-            //boolean foundOne = false;
-            
-            //for(String ext : mimeExtensions) {
-            //    if(parts[parts.length - 1].equalsIgnoreCase(ext)) {
-            //        foundOne = true;
-            //    }
-            //}
-            
-            //if(! foundOne) {
-            //    return false;
-            //}
-            
-        //}
-        
-        // Check coordinates
-        if (tr.rangeBounds != null) {
-            String[] coords = parts[0].split("_");
 
-            int zoomLevel = FilePathGenerator.findZoomLevel(dir.getParentFile().getName());
-            long x = Long.parseLong(coords[0]);
-            long y = Long.parseLong(coords[1]);
-            
-            boolean contains = tr.contains(x, y, zoomLevel);
-            
-            return contains;
-        }
-        
-        //System.out.println(dir.getAbsolutePath() + " " + name);
-        
-        return true;
+        // Check coordinates
+        String[] coords = parts[0].split("_");
+
+        int zoomLevel = findZoomLevel(gridSetPrefix, parent.getParentFile()
+                .getName());
+        long x = Long.parseLong(coords[0]);
+        long y = Long.parseLong(coords[1]);
+
+        boolean contains = tr.contains(x, y, zoomLevel);
+
+        return contains;
     }
 }
